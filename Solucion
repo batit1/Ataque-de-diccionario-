@@ -1,0 +1,99 @@
+import base64
+import multiprocessing
+import os
+import time
+import glob
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes, padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+NOMBRE_DICCIONARIO = "diccionario-original (1).txt" 
+ITERACIONES = 500_000
+
+def descifrar_mensaje(mensaje_cifrado, password):
+    """Lógica oficial de descifrado AES-PBKDF2"""
+    try:
+        datos = base64.b64decode(mensaje_cifrado)
+        salt, iv, cifrado = datos[:16], datos[16:32], datos[32:]
+        
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=ITERACIONES,
+            backend=default_backend()
+        )
+        clave = kdf.derive(password.encode())
+        
+        cipher = Cipher(algorithms.AES(clave), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        descifrado_raw = decryptor.update(cifrado) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        mensaje = unpadder.update(descifrado_raw) + unpadder.finalize()
+        return mensaje.decode('utf-8')
+    except:
+        return None
+
+def trabajador(args):
+    """Función para cada núcleo de la CPU"""
+    mensaje_cifrado, claves_chunk, id_msg = args
+    for pwd in claves_chunk:
+        res = descifrar_mensaje(mensaje_cifrado, pwd)
+        if res:
+            return (id_msg, res, pwd)
+    return None
+
+def main():
+    start_total = time.time()
+    
+    if not os.path.exists(NOMBRE_DICCIONARIO):
+        print(f" ERROR: No encuentro el archivo '{NOMBRE_DICCIONARIO}'")
+        print("Asegúrate de que el archivo esté en la misma carpeta que este script.")
+        return
+
+    with open(NOMBRE_DICCIONARIO, "r", encoding="utf-8", errors="ignore") as f:
+        claves = [l.strip() for l in f if l.strip()]
+
+    archivos_msg = glob.glob("mensajes_cifrados_*.txt")
+    if not archivos_msg:
+        print(" ERROR: No veo archivos de mensajes (mensajes_cifrados_XXXX.txt)")
+        return
+    
+    archivo_objetivo = archivos_msg[0]
+    print(f" Usando diccionario: {NOMBRE_DICCIONARIO}")
+    print(f" Atacando archivo: {archivo_objetivo}")
+
+    with open(archivo_objetivo, "r") as f:
+        mensajes = [l.strip() for l in f if l.strip()]
+
+    num_cpus = multiprocessing.cpu_count()
+    print(f" Iniciando ataque con {num_cpus} núcleos...")
+
+    for i, msg in enumerate(mensajes):
+        print(f"\n🔍 Analizando mensaje {i+1}/{len(mensajes)}...")
+        
+        chunk_size = (len(claves) // num_cpus) + 1
+        chunks = [claves[j:j + chunk_size] for j in range(0, len(claves), chunk_size)]
+        tareas = [(msg, chunk, i+1) for chunk in chunks]
+
+        with multiprocessing.Pool(processes=num_cpus) as pool:
+            encontrado = False
+            for resultado in pool.imap_unordered(trabajador, tareas):
+                if resultado:
+                    n, texto, pwd = resultado
+                    print(f" ¡MENSAJE {n} DESCIFRADO!")
+                    print(f"    CLAVE: {pwd}")
+                    print(f"    TEXTO: {texto}")
+                    encontrado = True
+                    pool.terminate()
+                    break
+            if not encontrado:
+                print(f" No se encontró la clave para el mensaje {i+1}")
+
+    print(f"\n FIN DEL ATAQUE en {time.time() - start_total:.2f} segundos.")
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    main()
